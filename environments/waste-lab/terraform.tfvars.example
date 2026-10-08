@@ -1,0 +1,7 @@
+
+project_id = "finops-lab-511007"
+
+region      = "us-central1"
+zone        = "us-central1-a"
+name_prefix = ""
+extra_labels = { owner = "daniel" }

@@ -1,0 +1,11 @@
+# Phase 5: move state from your laptop to a Cloud Storage bucket.
+# 1. Create the bucket once (state buckets are not managed by the stack that uses them):
+#      gcloud storage buckets create gs://<project_id>-tfstate --location=us-central1 --uniform-bucket-level-access
+#      gcloud storage buckets update gs://<project_id>-tfstate --versioning
+# 2. Rename this file to backend.tf, fill in the bucket name, then run: terraform init -migrate-state
+terraform {
+  backend "gcs" {
+    bucket = "REPLACE-ME-tfstate"
+    prefix = "waste-lab"
+  }
+}

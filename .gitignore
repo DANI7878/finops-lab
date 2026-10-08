@@ -1,0 +1,8 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+crash.log
+*.tfvars
+!*.tfvars.example
+# Commit .terraform.lock.hcl on purpose: it pins provider versions.
