@@ -1,3 +1,30 @@
+
+# Dedicated bucket for GCS access logs.
+# This bucket intentionally does not log to another bucket to avoid
+# recursive logging.
+resource "google_storage_bucket" "access_logs" {
+  # checkov:skip=CKV_GCP_62:Dedicated access logging destination bucket
+
+  name          = "${var.project_id}-access-logs"
+  location      = var.region
+  storage_class = "STANDARD"
+
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  versioning {
+    enabled = true
+  }
+}
+
+data "google_storage_project_service_account" "gcs_account" {
+}
+
+resource "google_storage_bucket_iam_member" "access_log_writer" {
+  bucket = google_storage_bucket.access_logs.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${data.google_storage_project_service_account.gcs_account.email_address}"
+}
 locals {
   base_labels = merge(
     {
@@ -49,10 +76,12 @@ module "unused_ip" {
 module "no_lifecycle_bucket" {
   source = "../../modules/storage-bucket"
 
-  name          = "${var.project_id}-${var.name_prefix}lab-data"
-  location      = upper(var.region)
-  force_destroy = true
-  labels        = merge(local.base_labels, { waste_type = "no-lifecycle" })
+  name              = "${var.project_id}-${var.name_prefix}lab-data"
+  location          = upper(var.region)
+  force_destroy     = true
+  labels            = merge(local.base_labels, { waste_type = "no-lifecycle" })
+  logging_bucket    = google_storage_bucket.access_logs.name
+  log_object_prefix = "no-lifecycle/"
 }
 
 # ---------------------------------------------------------------------------
@@ -78,4 +107,6 @@ module "control_bucket" {
       condition = { age = 365 }
     },
   ]
+  logging_bucket    = google_storage_bucket.access_logs.name
+  log_object_prefix = "control/"
 }
