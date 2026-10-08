@@ -1,0 +1,176 @@
+name: Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Create a destroy plan or apply an existing reviewed destroy plan"
+        required: true
+        type: choice
+        options:
+          - plan-destroy
+          - destroy
+      plan_run_id:
+        description: "Destroy-plan workflow run ID (required only for destroy)"
+        required: false
+        type: string
+      confirmation:
+        description: "For destroy, type DESTROY"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_WORKING_DIR: environments/waste-lab
+  TF_VERSION: "1.9.8"
+  TF_STATE_PREFIX: waste-lab
+
+jobs:
+  plan-destroy:
+    name: Terraform Destroy Plan
+    if: ${{ inputs.action == 'plan-destroy' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required repository variables
+        run: |
+          test -n "${{ vars.GCP_PROJECT_ID }}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
+          test -n "${{ vars.TF_STATE_BUCKET }}" || (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure GCS backend
+        run: cp backend.tf.example backend.tf
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="prefix=${{ env.TF_STATE_PREFIX }}"
+
+      - name: Create destroy plan
+        env:
+          TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+        run: terraform plan -destroy -out=tfplan-destroy
+
+      - name: Show destroy plan
+        run: terraform show -no-color tfplan-destroy
+
+      - name: Save destroy-plan metadata
+        run: |
+          echo "PLAN_SHA=${GITHUB_SHA}" > destroy-plan-metadata.env
+          echo "PLAN_RUN_ID=${GITHUB_RUN_ID}" >> destroy-plan-metadata.env
+          echo "PLAN_REPOSITORY=${GITHUB_REPOSITORY}" >> destroy-plan-metadata.env
+
+      - name: Upload exact destroy plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-destroy-plan-${{ github.run_id }}
+          path: |
+            ${{ env.TF_WORKING_DIR }}/tfplan-destroy
+            ${{ env.TF_WORKING_DIR }}/destroy-plan-metadata.env
+          retention-days: 5
+          if-no-files-found: error
+
+      - name: Destroy plan summary
+        run: |
+          echo "### Terraform destroy plan ready for review" >> "$GITHUB_STEP_SUMMARY"
+          echo "Review the **Show destroy plan** step above." >> "$GITHUB_STEP_SUMMARY"
+          echo "If approved, run this workflow again with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- action: \`destroy\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- plan_run_id: \`${GITHUB_RUN_ID}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- confirmation: \`DESTROY\`" >> "$GITHUB_STEP_SUMMARY"
+
+  destroy:
+    name: Apply Exact Reviewed Destroy Plan
+    if: ${{ inputs.action == 'destroy' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate destroy request
+        run: |
+          test -n "${{ inputs.plan_run_id }}" || (echo "plan_run_id is required when action=destroy" && exit 1)
+          test "${{ inputs.confirmation }}" = "DESTROY" || (echo "confirmation must exactly equal DESTROY" && exit 1)
+
+      - name: Download reviewed destroy plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-destroy-plan-${{ inputs.plan_run_id }}
+          path: reviewed-destroy-plan
+          run-id: ${{ inputs.plan_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read and validate destroy-plan metadata
+        id: metadata
+        working-directory: reviewed-destroy-plan/environments/waste-lab
+        run: |
+          cat destroy-plan-metadata.env
+          source destroy-plan-metadata.env
+          test "$PLAN_RUN_ID" = "${{ inputs.plan_run_id }}" || (echo "Plan run ID mismatch" && exit 1)
+          test "$PLAN_REPOSITORY" = "$GITHUB_REPOSITORY" || (echo "Plan repository mismatch" && exit 1)
+          echo "plan_sha=$PLAN_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact commit used for the reviewed destroy plan
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.metadata.outputs.plan_sha }}
+
+      - name: Validate required repository variables
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          test -n "${{ vars.GCP_PROJECT_ID }}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
+          test -n "${{ vars.TF_STATE_BUCKET }}" || (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure GCS backend
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: cp backend.tf.example backend.tf
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="prefix=${{ env.TF_STATE_PREFIX }}"
+
+      - name: Copy exact reviewed destroy plan into working directory
+        run: cp reviewed-destroy-plan/environments/waste-lab/tfplan-destroy "${TF_WORKING_DIR}/tfplan-destroy"
+
+      - name: Show exact reviewed destroy plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform show -no-color tfplan-destroy
+
+      - name: Destroy using exact reviewed plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -auto-approve tfplan-destroy
