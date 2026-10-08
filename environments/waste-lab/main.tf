@@ -76,12 +76,13 @@ module "unused_ip" {
 module "no_lifecycle_bucket" {
   source = "../../modules/storage-bucket"
 
-  name              = "${var.project_id}-${var.name_prefix}lab-data"
-  location          = upper(var.region)
-  force_destroy     = true
-  labels            = merge(local.base_labels, { waste_type = "no-lifecycle" })
-  logging_bucket    = google_storage_bucket.access_logs.name
-  log_object_prefix = "no-lifecycle/"
+  name               = "${var.project_id}-${var.name_prefix}lab-data"
+  location           = upper(var.region)
+  force_destroy      = true
+  labels             = merge(local.base_labels, { waste_type = "no-lifecycle" })
+  versioning_enabled = true
+  logging_bucket     = google_storage_bucket.access_logs.name
+  log_object_prefix  = "no-lifecycle/"
 }
 
 # ---------------------------------------------------------------------------
