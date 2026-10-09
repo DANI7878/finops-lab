@@ -1,5 +1,3 @@
-# checkov:skip=CKV_GCP_38:FinOps lab VM is non-critical test infrastructure; CSEK is not required
-# checkov:skip=CKV_GCP_40:External IP is controlled by enable_external_ip and disabled for the FinOps idle VM
 resource "google_compute_instance" "this" {
   name         = var.name
   zone         = var.zone
@@ -7,7 +5,6 @@ resource "google_compute_instance" "this" {
   labels       = var.labels
   tags         = var.network_tags
 
-  # Enforce secure metadata defaults.
   metadata = merge(
     var.metadata,
     {

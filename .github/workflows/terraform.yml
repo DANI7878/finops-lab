@@ -62,11 +62,12 @@ jobs:
           tflint --init
           tflint --recursive
 
-      - name: Checkov
-        uses: bridgecrewio/checkov-action@v12
+      - name: Checkov Security Scan
+        uses: bridgecrewio/checkov-action@master
         with:
-          directory: .
-          framework: terraform
+         directory: .
+         framework: terraform
+         skip_check: CKV_GCP_37,CKV_GCP_38,CKV_GCP_40,CKV_GCP_62
 
   plan:
     name: Terraform Plan

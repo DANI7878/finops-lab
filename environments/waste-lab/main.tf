@@ -14,7 +14,6 @@ locals {
 # Central bucket used for GCS access logs.
 # ---------------------------------------------------------------------------
 
-# checkov:skip=CKV_GCP_62:Dedicated access logging destination bucket; logging it to itself would create recursive logging
 resource "google_storage_bucket" "access_logs" {
   name          = "${var.project_id}-${var.name_prefix}access-logs"
   location      = upper(var.region)
