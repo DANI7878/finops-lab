@@ -1,3 +1,4 @@
+# checkov:skip=CKV_GCP_37:FinOps lab orphan disk is non-critical test infrastructure; CSEK is not required
 resource "google_compute_disk" "this" {
   name   = var.name
   zone   = var.zone

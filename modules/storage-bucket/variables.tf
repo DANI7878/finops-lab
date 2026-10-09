@@ -39,7 +39,7 @@ variable "force_destroy" {
 variable "versioning_enabled" {
   description = "Enable object versioning."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "lifecycle_rules" {

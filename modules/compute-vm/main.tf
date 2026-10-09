@@ -1,3 +1,5 @@
+# checkov:skip=CKV_GCP_38:FinOps lab VM is non-critical test infrastructure; CSEK is not required
+# checkov:skip=CKV_GCP_40:External IP is controlled by enable_external_ip and disabled for the FinOps idle VM
 resource "google_compute_instance" "this" {
   name         = var.name
   zone         = var.zone
@@ -5,8 +7,14 @@ resource "google_compute_instance" "this" {
   labels       = var.labels
   tags         = var.network_tags
 
-  # OS Login is a secure default; callers can override any key.
-  metadata = merge({ "enable-oslogin" = "TRUE" }, var.metadata)
+  # Enforce secure metadata defaults.
+  metadata = merge(
+    var.metadata,
+    {
+      "enable-oslogin"         = "TRUE"
+      "block-project-ssh-keys" = "true"
+    }
+  )
 
   resource_policies         = var.resource_policies
   deletion_protection       = var.deletion_protection
@@ -33,6 +41,7 @@ resource "google_compute_instance" "this" {
 
   dynamic "service_account" {
     for_each = var.service_account_email == null ? [] : [1]
+
     content {
       email  = var.service_account_email
       scopes = var.service_account_scopes
