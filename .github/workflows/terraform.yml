@@ -10,6 +10,7 @@ on:
         options:
           - plan
           - apply
+
       plan_run_id:
         description: "Plan workflow run ID (required only for apply)"
         required: false
@@ -28,15 +29,22 @@ env:
   TF_STATE_PREFIX: waste-lab
 
 jobs:
+
+  # ============================================================
+  # QUALITY CHECKS
+  # ============================================================
+
   quality:
     name: Format, Validate, Lint and Security
     if: ${{ inputs.action == 'plan' }}
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -45,14 +53,26 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      # ----------------------------------------------------------
+      # Terraform Format
+      # ----------------------------------------------------------
+
       - name: Terraform Format
         run: terraform fmt -check -recursive ../..
+
+      # ----------------------------------------------------------
+      # Terraform Validate
+      # ----------------------------------------------------------
 
       - name: Terraform Init for validation
         run: terraform init -backend=false
 
       - name: Terraform Validate
         run: terraform validate
+
+      # ----------------------------------------------------------
+      # TFLint
+      # ----------------------------------------------------------
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
@@ -62,36 +82,76 @@ jobs:
           tflint --init
           tflint --recursive
 
+      # ----------------------------------------------------------
+      # Checkov
+      #
+      # Intentional FinOps lab exceptions:
+      #
+      # CKV_GCP_37 - orphan lab disk does not require CSEK
+      # CKV_GCP_38 - idle lab VM does not require CSEK
+      # CKV_GCP_40 - module has dynamic access_config;
+      #              idle VM explicitly disables external IP
+      # CKV_GCP_62 - dedicated logging destination bucket
+      # ----------------------------------------------------------
+
       - name: Checkov Security Scan
         uses: bridgecrewio/checkov-action@master
         with:
-         directory: .
-         framework: terraform
-         skip_check: CKV_GCP_37,CKV_GCP_38,CKV_GCP_40,CKV_GCP_62
+          directory: .
+          framework: terraform
+          skip_check: CKV_GCP_37,CKV_GCP_38,CKV_GCP_40,CKV_GCP_62
+
+
+  # ============================================================
+  # TERRAFORM PLAN
+  # ============================================================
 
   plan:
     name: Terraform Plan
     if: ${{ inputs.action == 'plan' }}
     needs: quality
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ----------------------------------------------------------
+      # Validate GitHub configuration
+      # ----------------------------------------------------------
+
       - name: Validate required repository variables
         run: |
-          test -n "${{ vars.GCP_PROJECT_ID }}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
-          test -n "${{ vars.TF_STATE_BUCKET }}" || (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+          test -n "${{ vars.GCP_PROJECT_ID }}" || \
+            (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
+
+          test -n "${{ vars.TF_STATE_BUCKET }}" || \
+            (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+
+          test -n "${{ secrets.GCP_WIF_PROVIDER }}" || \
+            (echo "Missing secret GCP_WIF_PROVIDER" && exit 1)
+
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}" || \
+            (echo "Missing secret GCP_SERVICE_ACCOUNT" && exit 1)
+
+      # ----------------------------------------------------------
+      # GCP Authentication
+      # ----------------------------------------------------------
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # ----------------------------------------------------------
+      # Terraform
+      # ----------------------------------------------------------
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -107,37 +167,90 @@ jobs:
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="prefix=${{ env.TF_STATE_PREFIX }}"
 
+      # ----------------------------------------------------------
+      # Create exact binary plan
+      # ----------------------------------------------------------
+
       - name: Terraform Plan
         env:
           TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
         run: terraform plan -out=tfplan
 
+      # ----------------------------------------------------------
+      # Human-readable plan
+      # ----------------------------------------------------------
+
       - name: Show Terraform Plan
         run: terraform show -no-color tfplan
+
+      # ----------------------------------------------------------
+      # Metadata binds the plan to:
+      #
+      # - exact commit
+      # - exact workflow run
+      # - exact repository
+      # - project
+      # - state bucket
+      # ----------------------------------------------------------
 
       - name: Save plan metadata
         run: |
           echo "PLAN_SHA=${GITHUB_SHA}" > plan-metadata.env
           echo "PLAN_RUN_ID=${GITHUB_RUN_ID}" >> plan-metadata.env
           echo "PLAN_REPOSITORY=${GITHUB_REPOSITORY}" >> plan-metadata.env
+          echo "PLAN_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}" >> plan-metadata.env
+          echo "PLAN_STATE_BUCKET=${{ vars.TF_STATE_BUCKET }}" >> plan-metadata.env
+
+      - name: Show plan metadata
+        run: cat plan-metadata.env
+
+      # ----------------------------------------------------------
+      # IMPORTANT:
+      #
+      # Upload the files individually.
+      #
+      # When downloaded, the artifact will contain:
+      #
+      # reviewed-plan/
+      # ├── tfplan
+      # └── plan-metadata.env
+      #
+      # NOT:
+      #
+      # reviewed-plan/environments/waste-lab/...
+      # ----------------------------------------------------------
 
       - name: Upload exact Terraform plan
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan-${{ github.run_id }}
           path: |
-            ${{ env.TF_WORKING_DIR }}/tfplan
-            ${{ env.TF_WORKING_DIR }}/plan-metadata.env
+            environments/waste-lab/tfplan
+            environments/waste-lab/plan-metadata.env
           retention-days: 5
           if-no-files-found: error
+
+      # ----------------------------------------------------------
+      # Workflow summary
+      # ----------------------------------------------------------
 
       - name: Plan summary
         run: |
           echo "### Terraform plan ready for review" >> "$GITHUB_STEP_SUMMARY"
-          echo "Review the **Show Terraform Plan** step above." >> "$GITHUB_STEP_SUMMARY"
-          echo "If approved, run this same workflow again with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Review the **Show Terraform Plan** step." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "If the plan is approved, run this workflow again with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- action: \`apply\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- plan_run_id: \`${GITHUB_RUN_ID}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The Apply job will use the exact saved tfplan." >> "$GITHUB_STEP_SUMMARY"
+
+
+  # ============================================================
+  # TERRAFORM APPLY
+  # ============================================================
 
   apply:
     name: Apply Exact Reviewed Plan
@@ -145,9 +258,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ----------------------------------------------------------
+      # Require plan run ID
+      # ----------------------------------------------------------
+
       - name: Validate Plan Run ID
         run: |
-          test -n "${{ inputs.plan_run_id }}" || (echo "plan_run_id is required when action=apply" && exit 1)
+          if [ -z "${{ inputs.plan_run_id }}" ]; then
+            echo "ERROR: plan_run_id is required when action=apply"
+            exit 1
+          fi
+
+      # ----------------------------------------------------------
+      # Download artifact from PLAN workflow run
+      #
+      # Result:
+      #
+      # reviewed-plan/
+      # ├── tfplan
+      # └── plan-metadata.env
+      # ----------------------------------------------------------
 
       - name: Download reviewed plan artifact
         uses: actions/download-artifact@v4
@@ -157,32 +288,113 @@ jobs:
           run-id: ${{ inputs.plan_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # ----------------------------------------------------------
+      # Debug/verification
+      # ----------------------------------------------------------
+
+      - name: Show downloaded artifact
+        run: |
+          echo "Downloaded artifact contents:"
+          find reviewed-plan -type f -print
+
+      # ----------------------------------------------------------
+      # Read metadata BEFORE checkout.
+      #
+      # Do NOT use:
+      #
+      # working-directory:
+      # reviewed-plan/environments/waste-lab
+      #
+      # because that directory does not exist.
+      # ----------------------------------------------------------
+
       - name: Read and validate plan metadata
         id: metadata
-        working-directory: reviewed-plan/environments/waste-lab
         run: |
-          cat plan-metadata.env
-          source plan-metadata.env
-          test "$PLAN_RUN_ID" = "${{ inputs.plan_run_id }}" || (echo "Plan run ID mismatch" && exit 1)
-          test "$PLAN_REPOSITORY" = "$GITHUB_REPOSITORY" || (echo "Plan repository mismatch" && exit 1)
+          METADATA_FILE="reviewed-plan/plan-metadata.env"
+
+          if [ ! -f "$METADATA_FILE" ]; then
+            echo "ERROR: plan-metadata.env was not found."
+            echo "Artifact contents:"
+            find reviewed-plan -type f -print
+            exit 1
+          fi
+
+          cat "$METADATA_FILE"
+
+          PLAN_SHA=$(grep '^PLAN_SHA=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_RUN_ID=$(grep '^PLAN_RUN_ID=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_REPOSITORY=$(grep '^PLAN_REPOSITORY=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_PROJECT_ID=$(grep '^PLAN_PROJECT_ID=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_STATE_BUCKET=$(grep '^PLAN_STATE_BUCKET=' "$METADATA_FILE" | cut -d= -f2-)
+
+          if [ -z "$PLAN_SHA" ]; then
+            echo "ERROR: PLAN_SHA is missing."
+            exit 1
+          fi
+
+          if [ "$PLAN_RUN_ID" != "${{ inputs.plan_run_id }}" ]; then
+            echo "ERROR: Plan run ID mismatch."
+            exit 1
+          fi
+
+          if [ "$PLAN_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "ERROR: Plan repository mismatch."
+            exit 1
+          fi
+
+          if [ "$PLAN_PROJECT_ID" != "${{ vars.GCP_PROJECT_ID }}" ]; then
+            echo "ERROR: GCP project differs from the reviewed plan."
+            exit 1
+          fi
+
+          if [ "$PLAN_STATE_BUCKET" != "${{ vars.TF_STATE_BUCKET }}" ]; then
+            echo "ERROR: Terraform state bucket differs from the reviewed plan."
+            exit 1
+          fi
+
           echo "plan_sha=$PLAN_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout exact commit used for the reviewed plan
+      # ----------------------------------------------------------
+      # Checkout the EXACT commit used for Plan
+      # ----------------------------------------------------------
+
+      - name: Checkout exact commit used for reviewed plan
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.metadata.outputs.plan_sha }}
 
+      # ----------------------------------------------------------
+      # Validate GitHub configuration
+      # ----------------------------------------------------------
+
       - name: Validate required repository variables
-        working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          test -n "${{ vars.GCP_PROJECT_ID }}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
-          test -n "${{ vars.TF_STATE_BUCKET }}" || (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+          test -n "${{ vars.GCP_PROJECT_ID }}" || \
+            (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
+
+          test -n "${{ vars.TF_STATE_BUCKET }}" || \
+            (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+
+          test -n "${{ secrets.GCP_WIF_PROVIDER }}" || \
+            (echo "Missing secret GCP_WIF_PROVIDER" && exit 1)
+
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}" || \
+            (echo "Missing secret GCP_SERVICE_ACCOUNT" && exit 1)
+
+      # ----------------------------------------------------------
+      # GCP Authentication
+      # ----------------------------------------------------------
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      # ----------------------------------------------------------
+      # Terraform
+      # ----------------------------------------------------------
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -200,12 +412,34 @@ jobs:
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="prefix=${{ env.TF_STATE_PREFIX }}"
 
-      - name: Copy exact reviewed plan into working directory
-        run: cp reviewed-plan/environments/waste-lab/tfplan "${TF_WORKING_DIR}/tfplan"
+      # ----------------------------------------------------------
+      # Move the EXACT downloaded plan into Terraform directory
+      # ----------------------------------------------------------
+
+      - name: Copy exact reviewed plan into Terraform working directory
+        run: |
+          if [ ! -f "reviewed-plan/tfplan" ]; then
+            echo "ERROR: reviewed-plan/tfplan was not found."
+            echo "Artifact contents:"
+            find reviewed-plan -type f -print
+            exit 1
+          fi
+
+          cp reviewed-plan/tfplan "${TF_WORKING_DIR}/tfplan"
+
+      # ----------------------------------------------------------
+      # Display it again before Apply
+      # ----------------------------------------------------------
 
       - name: Show exact reviewed plan
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform show -no-color tfplan
+
+      # ----------------------------------------------------------
+      # Apply the EXACT reviewed binary plan.
+      #
+      # There is intentionally NO terraform plan command here.
+      # ----------------------------------------------------------
 
       - name: Apply exact reviewed plan
         working-directory: ${{ env.TF_WORKING_DIR }}
