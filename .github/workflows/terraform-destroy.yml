@@ -8,14 +8,16 @@ on:
         required: true
         type: choice
         options:
-          - plan-destroy
+          - destroy-plan
           - destroy
+
       plan_run_id:
         description: "Destroy-plan workflow run ID (required only for destroy)"
         required: false
         type: string
+
       confirmation:
-        description: "For destroy, type DESTROY"
+        description: "Type DESTROY when applying a reviewed destroy plan"
         required: false
         type: string
 
@@ -32,22 +34,50 @@ env:
   TF_STATE_PREFIX: waste-lab
 
 jobs:
-  plan-destroy:
+
+  # ============================================================
+  # DESTROY PLAN
+  # ============================================================
+
+  destroy-plan:
     name: Terraform Destroy Plan
-    if: ${{ inputs.action == 'plan-destroy' }}
+    if: ${{ inputs.action == 'destroy-plan' }}
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: ${{ env.TF_WORKING_DIR }}
 
     steps:
+
+      # ----------------------------------------------------------
+      # Checkout
+      # ----------------------------------------------------------
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate required repository variables
+      # ----------------------------------------------------------
+      # Validate GitHub configuration
+      # ----------------------------------------------------------
+
+      - name: Validate required repository configuration
         run: |
-          test -n "${{ vars.GCP_PROJECT_ID }}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
-          test -n "${{ vars.TF_STATE_BUCKET }}" || (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+          test -n "${{ vars.GCP_PROJECT_ID }}" || \
+            (echo "ERROR: Missing repository variable GCP_PROJECT_ID" && exit 1)
+
+          test -n "${{ vars.TF_STATE_BUCKET }}" || \
+            (echo "ERROR: Missing repository variable TF_STATE_BUCKET" && exit 1)
+
+          test -n "${{ secrets.GCP_WIF_PROVIDER }}" || \
+            (echo "ERROR: Missing secret GCP_WIF_PROVIDER" && exit 1)
+
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}" || \
+            (echo "ERROR: Missing secret GCP_SERVICE_ACCOUNT" && exit 1)
+
+      # ----------------------------------------------------------
+      # Authenticate to GCP using WIF
+      # ----------------------------------------------------------
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -55,10 +85,18 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
+      # ----------------------------------------------------------
+      # Setup Terraform
+      # ----------------------------------------------------------
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+
+      # ----------------------------------------------------------
+      # Configure GCS backend
+      # ----------------------------------------------------------
 
       - name: Configure GCS backend
         run: cp backend.tf.example backend.tf
@@ -69,38 +107,109 @@ jobs:
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="prefix=${{ env.TF_STATE_PREFIX }}"
 
-      - name: Create destroy plan
+      # ----------------------------------------------------------
+      # Create EXACT binary destroy plan
+      # ----------------------------------------------------------
+
+      - name: Terraform Destroy Plan
         env:
           TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
-        run: terraform plan -destroy -out=tfplan-destroy
+        run: terraform plan -destroy -out=tfplan
 
-      - name: Show destroy plan
-        run: terraform show -no-color tfplan-destroy
+      # ----------------------------------------------------------
+      # Show destroy plan for manual review
+      # ----------------------------------------------------------
 
-      - name: Save destroy-plan metadata
+      - name: Show Terraform Destroy Plan
+        run: terraform show -no-color tfplan
+
+      # ----------------------------------------------------------
+      # Save metadata
+      #
+      # This binds the destroy plan to:
+      #
+      # - exact commit
+      # - exact workflow run
+      # - exact repository
+      # - exact GCP project
+      # - exact state bucket
+      # ----------------------------------------------------------
+
+      - name: Save destroy plan metadata
         run: |
-          echo "PLAN_SHA=${GITHUB_SHA}" > destroy-plan-metadata.env
-          echo "PLAN_RUN_ID=${GITHUB_RUN_ID}" >> destroy-plan-metadata.env
-          echo "PLAN_REPOSITORY=${GITHUB_REPOSITORY}" >> destroy-plan-metadata.env
+          echo "PLAN_TYPE=destroy" > plan-metadata.env
+          echo "PLAN_SHA=${GITHUB_SHA}" >> plan-metadata.env
+          echo "PLAN_RUN_ID=${GITHUB_RUN_ID}" >> plan-metadata.env
+          echo "PLAN_REPOSITORY=${GITHUB_REPOSITORY}" >> plan-metadata.env
+          echo "PLAN_PROJECT_ID=${{ vars.GCP_PROJECT_ID }}" >> plan-metadata.env
+          echo "PLAN_STATE_BUCKET=${{ vars.TF_STATE_BUCKET }}" >> plan-metadata.env
 
-      - name: Upload exact destroy plan
+      - name: Show destroy plan metadata
+        run: cat plan-metadata.env
+
+      # ----------------------------------------------------------
+      # Upload EXACT destroy plan
+      #
+      # When downloaded:
+      #
+      # $RUNNER_TEMP/reviewed-destroy-plan/
+      # ├── tfplan
+      # └── plan-metadata.env
+      # ----------------------------------------------------------
+
+      - name: Upload exact Terraform destroy plan
         uses: actions/upload-artifact@v4
         with:
           name: terraform-destroy-plan-${{ github.run_id }}
           path: |
-            ${{ env.TF_WORKING_DIR }}/tfplan-destroy
-            ${{ env.TF_WORKING_DIR }}/destroy-plan-metadata.env
+            environments/waste-lab/tfplan
+            environments/waste-lab/plan-metadata.env
           retention-days: 5
           if-no-files-found: error
+
+      # ----------------------------------------------------------
+      # Summary
+      # ----------------------------------------------------------
 
       - name: Destroy plan summary
         run: |
           echo "### Terraform destroy plan ready for review" >> "$GITHUB_STEP_SUMMARY"
-          echo "Review the **Show destroy plan** step above." >> "$GITHUB_STEP_SUMMARY"
-          echo "If approved, run this workflow again with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "**Destroy Plan Run ID:** \`${GITHUB_RUN_ID}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Review the **Show Terraform Destroy Plan** step carefully." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "If the destroy plan is approved, run this workflow again with:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
           echo "- action: \`destroy\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- plan_run_id: \`${GITHUB_RUN_ID}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- confirmation: \`DESTROY\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "The Destroy job will use this exact binary destroy plan." >> "$GITHUB_STEP_SUMMARY"
+
+
+  # ============================================================
+  # DESTROY
+  #
+  # Downloads and applies the EXACT reviewed destroy plan.
+  #
+  # It does NOT execute:
+  #
+  # terraform destroy
+  #
+  # and it does NOT generate another plan.
+  #
+  # Instead:
+  #
+  # terraform apply tfplan
+  #
+  # where tfplan is the reviewed -destroy plan.
+  # ============================================================
 
   destroy:
     name: Apply Exact Reviewed Destroy Plan
@@ -108,39 +217,216 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Validate destroy request
+
+      # ----------------------------------------------------------
+      # Safety confirmation
+      # ----------------------------------------------------------
+
+      - name: Validate Destroy Confirmation
         run: |
-          test -n "${{ inputs.plan_run_id }}" || (echo "plan_run_id is required when action=destroy" && exit 1)
-          test "${{ inputs.confirmation }}" = "DESTROY" || (echo "confirmation must exactly equal DESTROY" && exit 1)
+          if [ "${{ inputs.confirmation }}" != "DESTROY" ]; then
+            echo "ERROR: confirmation must be exactly:"
+            echo "DESTROY"
+            exit 1
+          fi
+
+          echo "Destroy confirmation accepted."
+
+      # ----------------------------------------------------------
+      # Require numeric plan run ID
+      # ----------------------------------------------------------
+
+      - name: Validate Destroy Plan Run ID
+        run: |
+          if [ -z "${{ inputs.plan_run_id }}" ]; then
+            echo "ERROR: plan_run_id is required when action=destroy"
+            exit 1
+          fi
+
+          if ! [[ "${{ inputs.plan_run_id }}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: plan_run_id must be numeric"
+            exit 1
+          fi
+
+      # ----------------------------------------------------------
+      # Download outside Git working directory.
+      #
+      # This fixes the problem where actions/checkout cleans
+      # the workspace and deletes the downloaded artifact.
+      # ----------------------------------------------------------
 
       - name: Download reviewed destroy plan artifact
         uses: actions/download-artifact@v4
         with:
           name: terraform-destroy-plan-${{ inputs.plan_run_id }}
-          path: reviewed-destroy-plan
+          path: ${{ runner.temp }}/reviewed-destroy-plan
           run-id: ${{ inputs.plan_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Read and validate destroy-plan metadata
-        id: metadata
-        working-directory: reviewed-destroy-plan/environments/waste-lab
+      # ----------------------------------------------------------
+      # Verify artifact
+      # ----------------------------------------------------------
+
+      - name: Show downloaded destroy artifact
         run: |
-          cat destroy-plan-metadata.env
-          source destroy-plan-metadata.env
-          test "$PLAN_RUN_ID" = "${{ inputs.plan_run_id }}" || (echo "Plan run ID mismatch" && exit 1)
-          test "$PLAN_REPOSITORY" = "$GITHUB_REPOSITORY" || (echo "Plan repository mismatch" && exit 1)
+          echo "Downloaded destroy artifact contents:"
+          echo ""
+
+          find "${RUNNER_TEMP}/reviewed-destroy-plan" -type f -print
+
+          echo ""
+
+          if [ ! -f "${RUNNER_TEMP}/reviewed-destroy-plan/tfplan" ]; then
+            echo "ERROR: Reviewed destroy tfplan was not found."
+            exit 1
+          fi
+
+          if [ ! -f "${RUNNER_TEMP}/reviewed-destroy-plan/plan-metadata.env" ]; then
+            echo "ERROR: Destroy plan metadata was not found."
+            exit 1
+          fi
+
+          echo "Destroy artifact verified."
+
+      # ----------------------------------------------------------
+      # Validate metadata BEFORE checkout
+      # ----------------------------------------------------------
+
+      - name: Read and validate destroy plan metadata
+        id: metadata
+        run: |
+          METADATA_FILE="${RUNNER_TEMP}/reviewed-destroy-plan/plan-metadata.env"
+
+          echo "Destroy plan metadata:"
+          echo "----------------------------------------"
+          cat "$METADATA_FILE"
+          echo "----------------------------------------"
+
+          PLAN_TYPE=$(grep '^PLAN_TYPE=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_SHA=$(grep '^PLAN_SHA=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_RUN_ID=$(grep '^PLAN_RUN_ID=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_REPOSITORY=$(grep '^PLAN_REPOSITORY=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_PROJECT_ID=$(grep '^PLAN_PROJECT_ID=' "$METADATA_FILE" | cut -d= -f2-)
+          PLAN_STATE_BUCKET=$(grep '^PLAN_STATE_BUCKET=' "$METADATA_FILE" | cut -d= -f2-)
+
+          if [ "$PLAN_TYPE" != "destroy" ]; then
+            echo "ERROR: Artifact is not a Terraform destroy plan."
+            echo "Expected: destroy"
+            echo "Found:    $PLAN_TYPE"
+            exit 1
+          fi
+
+          if [ -z "$PLAN_SHA" ]; then
+            echo "ERROR: PLAN_SHA is missing."
+            exit 1
+          fi
+
+          if [ -z "$PLAN_RUN_ID" ]; then
+            echo "ERROR: PLAN_RUN_ID is missing."
+            exit 1
+          fi
+
+          if [ -z "$PLAN_REPOSITORY" ]; then
+            echo "ERROR: PLAN_REPOSITORY is missing."
+            exit 1
+          fi
+
+          if [ -z "$PLAN_PROJECT_ID" ]; then
+            echo "ERROR: PLAN_PROJECT_ID is missing."
+            exit 1
+          fi
+
+          if [ -z "$PLAN_STATE_BUCKET" ]; then
+            echo "ERROR: PLAN_STATE_BUCKET is missing."
+            exit 1
+          fi
+
+          if [ "$PLAN_RUN_ID" != "${{ inputs.plan_run_id }}" ]; then
+            echo "ERROR: Destroy Plan Run ID mismatch."
+            echo "Expected: ${{ inputs.plan_run_id }}"
+            echo "Found:    $PLAN_RUN_ID"
+            exit 1
+          fi
+
+          if [ "$PLAN_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "ERROR: Repository mismatch."
+            echo "Expected: $GITHUB_REPOSITORY"
+            echo "Found:    $PLAN_REPOSITORY"
+            exit 1
+          fi
+
+          if [ "$PLAN_PROJECT_ID" != "${{ vars.GCP_PROJECT_ID }}" ]; then
+            echo "ERROR: GCP project differs from the reviewed destroy plan."
+            echo "Expected: ${{ vars.GCP_PROJECT_ID }}"
+            echo "Found:    $PLAN_PROJECT_ID"
+            exit 1
+          fi
+
+          if [ "$PLAN_STATE_BUCKET" != "${{ vars.TF_STATE_BUCKET }}" ]; then
+            echo "ERROR: Terraform state bucket differs from the reviewed destroy plan."
+            echo "Expected: ${{ vars.TF_STATE_BUCKET }}"
+            echo "Found:    $PLAN_STATE_BUCKET"
+            exit 1
+          fi
+
           echo "plan_sha=$PLAN_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout exact commit used for the reviewed destroy plan
+          echo ""
+          echo "Destroy plan metadata validation successful."
+
+      # ----------------------------------------------------------
+      # Checkout EXACT commit that generated destroy plan.
+      #
+      # RUNNER_TEMP is outside the Git workspace, so checkout
+      # cannot delete the reviewed destroy plan.
+      # ----------------------------------------------------------
+
+      - name: Checkout exact commit used for reviewed destroy plan
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.metadata.outputs.plan_sha }}
 
-      - name: Validate required repository variables
-        working-directory: ${{ env.TF_WORKING_DIR }}
+      # ----------------------------------------------------------
+      # Verify artifact survived checkout
+      # ----------------------------------------------------------
+
+      - name: Verify reviewed destroy plan after checkout
         run: |
-          test -n "${{ vars.GCP_PROJECT_ID }}" || (echo "Missing repository variable GCP_PROJECT_ID" && exit 1)
-          test -n "${{ vars.TF_STATE_BUCKET }}" || (echo "Missing repository variable TF_STATE_BUCKET" && exit 1)
+          echo "Verifying reviewed destroy plan after checkout..."
+
+          if [ ! -f "${RUNNER_TEMP}/reviewed-destroy-plan/tfplan" ]; then
+            echo "ERROR: Reviewed destroy tfplan no longer exists."
+            exit 1
+          fi
+
+          if [ ! -f "${RUNNER_TEMP}/reviewed-destroy-plan/plan-metadata.env" ]; then
+            echo "ERROR: Reviewed destroy plan metadata no longer exists."
+            exit 1
+          fi
+
+          echo "Reviewed destroy plan preserved successfully."
+
+      # ----------------------------------------------------------
+      # Validate repository configuration
+      # ----------------------------------------------------------
+
+      - name: Validate required repository configuration
+        run: |
+          test -n "${{ vars.GCP_PROJECT_ID }}" || \
+            (echo "ERROR: Missing repository variable GCP_PROJECT_ID" && exit 1)
+
+          test -n "${{ vars.TF_STATE_BUCKET }}" || \
+            (echo "ERROR: Missing repository variable TF_STATE_BUCKET" && exit 1)
+
+          test -n "${{ secrets.GCP_WIF_PROVIDER }}" || \
+            (echo "ERROR: Missing secret GCP_WIF_PROVIDER" && exit 1)
+
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}" || \
+            (echo "ERROR: Missing secret GCP_SERVICE_ACCOUNT" && exit 1)
+
+      # ----------------------------------------------------------
+      # Authenticate to GCP
+      # ----------------------------------------------------------
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -148,10 +434,18 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
+      # ----------------------------------------------------------
+      # Setup Terraform
+      # ----------------------------------------------------------
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+
+      # ----------------------------------------------------------
+      # Configure SAME backend used for destroy plan
+      # ----------------------------------------------------------
 
       - name: Configure GCS backend
         working-directory: ${{ env.TF_WORKING_DIR }}
@@ -164,13 +458,68 @@ jobs:
             -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
             -backend-config="prefix=${{ env.TF_STATE_PREFIX }}"
 
-      - name: Copy exact reviewed destroy plan into working directory
-        run: cp reviewed-destroy-plan/environments/waste-lab/tfplan-destroy "${TF_WORKING_DIR}/tfplan-destroy"
+      # ----------------------------------------------------------
+      # Copy EXACT reviewed destroy plan from RUNNER_TEMP
+      # ----------------------------------------------------------
+
+      - name: Copy exact reviewed destroy plan
+        run: |
+          SOURCE_PLAN="${RUNNER_TEMP}/reviewed-destroy-plan/tfplan"
+          DESTINATION_PLAN="${TF_WORKING_DIR}/tfplan"
+
+          if [ ! -f "$SOURCE_PLAN" ]; then
+            echo "ERROR: Reviewed destroy plan was not found:"
+            echo "$SOURCE_PLAN"
+            exit 1
+          fi
+
+          cp "$SOURCE_PLAN" "$DESTINATION_PLAN"
+
+          echo "Reviewed destroy plan copied successfully:"
+          echo "$DESTINATION_PLAN"
+
+      # ----------------------------------------------------------
+      # Show EXACT destroy plan again
+      # ----------------------------------------------------------
 
       - name: Show exact reviewed destroy plan
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform show -no-color tfplan-destroy
+        run: terraform show -no-color tfplan
 
-      - name: Destroy using exact reviewed plan
+      # ----------------------------------------------------------
+      # FINAL DESTROY
+      #
+      # tfplan was originally generated using:
+      #
+      # terraform plan -destroy -out=tfplan
+      #
+      # Therefore applying it performs the reviewed destruction.
+      #
+      # There is deliberately NO:
+      #
+      # terraform destroy -auto-approve
+      #
+      # because that would create a fresh plan.
+      # ----------------------------------------------------------
+
+      - name: Apply exact reviewed destroy plan
         working-directory: ${{ env.TF_WORKING_DIR }}
-        run: terraform apply -auto-approve tfplan-destroy
+        run: terraform apply -auto-approve tfplan
+
+      # ----------------------------------------------------------
+      # Summary
+      # ----------------------------------------------------------
+
+      - name: Destroy summary
+        if: ${{ success() }}
+        run: |
+          echo "### Terraform Destroy completed successfully" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "- Reviewed Destroy Plan Run ID: \`${{ inputs.plan_run_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Plan commit: \`${{ steps.metadata.outputs.plan_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Repository: \`${GITHUB_REPOSITORY}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GCP Project: \`${{ vars.GCP_PROJECT_ID }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "The exact reviewed Terraform destroy plan was applied." >> "$GITHUB_STEP_SUMMARY"
